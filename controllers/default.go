@@ -1,6 +1,8 @@
 package controllers
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"path"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/beego/beego/v2/client/orm"
 	"github.com/beego/beego/v2/core/logs"
 	beego "github.com/beego/beego/v2/server/web"
+	"github.com/gomodule/redigo/redis"
 	"github.com/prometheus/common/log"
 )
 
@@ -50,15 +53,41 @@ func (c *MainController) ShowAdd() {
 	c.TplName = "add.html"
 	c.Layout = "layout.html"
 	var types []*models.ArticleType
-	o := orm.NewOrm()
-	n, err := o.QueryTable("ArticleType").All(&types)
-	if err != nil {
-		logs.Info("failed to get article type,err:%s", err.Error())
-		return
+
+	//从redis读取缓存
+
+	redisaddr, _ := beego.AppConfig.String("redisaddr")
+	redisConn, connerr := redis.Dial("tcp", redisaddr)
+
+	if connerr != nil {
+		logs.Info("failed to connect to redis,addr:%s", redisaddr)
+	} else {
+		defer redisConn.Close()
+		var typebuf []byte
+		typebuf, err := redis.Bytes(redisConn.Do("get", "types"))
+		if err == nil {
+			dec := gob.NewDecoder(bytes.NewBuffer(typebuf))
+			dec.Decode(&types)
+		}
 	}
-	if n == 0 {
-		return
+
+	if types == nil {
+		o := orm.NewOrm()
+		_, err := o.QueryTable("ArticleType").All(&types)
+		if err != nil {
+			logs.Info("failed to get article type,err:%s", err.Error())
+			logs.Info(err.Error())
+			return
+		}
+		if connerr == nil {
+			var typebuf bytes.Buffer
+			enc := gob.NewEncoder(&typebuf)
+			enc.Encode(&types)
+			redisConn.Do("set", "types", typebuf)
+		}
+
 	}
+
 	c.Data["types"] = types
 }
 
@@ -89,6 +118,7 @@ func (c *MainController) ShowIndex() {
 
 	var articles []models.Article
 	var types []models.ArticleType
+
 	o := orm.NewOrm()
 	_, err = o.QueryTable("ArticleType").All(&types)
 	if err != nil {
@@ -97,7 +127,10 @@ func (c *MainController) ShowIndex() {
 	}
 
 	table := o.QueryTable("Article")
-
+	if err != nil {
+		logs.Info(err.Error())
+		return
+	}
 	var totalRecs int64
 
 	if typeId == -1 {
